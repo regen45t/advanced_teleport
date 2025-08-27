@@ -140,6 +140,18 @@ local function loadOnlineTeleports()
     end
 end
 
+local function loadSettings()
+    local config = ac.INIConfig.load(configFile)
+    
+    teleportWhenPluginClosed = config:get("SETTINGS", "TELEPORT_WHEN_PLUGIN_CLOSED", true)
+end
+
+local function saveSettings()
+    local config = ac.INIConfig.load(configFile)
+    config:set("SETTINGS", "TELEPORT_WHEN_PLUGIN_CLOSED", teleportWhenPluginClosed)
+    config:save()
+end
+
 function script.windowShow()
     windowOpen = true
     -- Always ensure teleports are loaded (in case script was reset)
@@ -176,18 +188,6 @@ function script.windowShow()
         end
     end
     loadSettings()
-end
-
-local function loadSettings()
-    local config = ac.INIConfig.load(configFile)
-    
-    teleportWhenPluginClosed = config:get("SETTINGS", "TELEPORT_WHEN_PLUGIN_CLOSED", true)
-end
-
-local function saveSettings()
-    local config = ac.INIConfig.load(configFile)
-    config:set("SETTINGS", "TELEPORT_WHEN_PLUGIN_CLOSED", teleportWhenPluginClosed)
-    config:save()
 end
 
 function script.windowMain(dt)
