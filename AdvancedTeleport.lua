@@ -1,8 +1,13 @@
+local teleportWhenPluginClosed = true
+local windowOpen = false
+
 local teleport_button = ac.ControlButton("AdvancedTeleport/Teleport")
+local teleport_button_alternate = ac.ControlButton("AdvancedTeleport/TeleportAlternate")
 local sim = ac.getSim()
 local teleports = {}
 local teleportGroups = {}
-local selectedGroupIndex = -1
+local selectedGroupHash = nil
+local initialized = false
 local mapId = nil
 local mapHash = nil
 local configFile = ac.getFolder(ac.FolderID.ACApps) .. "/lua/AdvancedTeleport/config.ini"
@@ -12,6 +17,8 @@ local teleportToPitsInProgress = false
 local teleportToGroupInProgress = false
 
 local targetTeleport = nil
+local availableTeleports = {}
+local firstTeleport = nil
 
 local function checkTeleportOccupied(teleport, shouldConsiderCars)
     for i=0, sim.carsCount-1 do
@@ -28,6 +35,14 @@ local function hashMapName(mapName)
         hash = ((hash * 31) + string.byte(mapName, i)) % 1000000
     end
     return "MAP_" .. hash
+end
+
+local function hashGroupName(groupName)
+    local hash = 0
+    for i = 1, #groupName do
+        hash = ((hash * 31) + string.byte(groupName, i)) % 1000000
+    end
+    return "GROUP_" .. hash
 end
 
 -- Load teleport points from server configuration
@@ -79,12 +94,19 @@ local function loadOnlineTeleports()
     local groupMap = {}
     for _, teleport in ipairs(teleports) do
         local groupName = teleport.GROUP or "Default"
+        local groupHash = hashGroupName(groupName)
+        
         if not groupMap[groupName] then
             groupMap[groupName] = {
                 name = groupName,
+                hash = groupHash,
                 teleports = {}
             }
         end
+        
+        -- Add group hash to individual teleport record
+        teleport.GROUP_HASH = groupHash
+        
         table.insert(groupMap[groupName].teleports, teleport)
     end
     
@@ -96,35 +118,121 @@ local function loadOnlineTeleports()
     -- Sort groups by name
     table.sort(teleportGroups, function(a, b) return a.name < b.name end)
     
-    -- Load saved group index for current map
+    -- Load saved group hash for current map
     local config = ac.INIConfig.load(configFile)
     
-    local savedIndex = config:get(mapHash, "SELECTED_GROUP_INDEX", -1)
+    local savedGroupHash = config:get(mapHash, "SELECTED_GROUP_HASH", "")
     
-    -- Validate that the saved index is still valid for current groups
-    if savedIndex >= 0 and savedIndex < #teleportGroups then
-        selectedGroupIndex = savedIndex
-    else
-        selectedGroupIndex = -1
+    -- Find the group that matches the saved hash
+    selectedGroupHash = nil
+    if savedGroupHash ~= "" then
+        for _, group in ipairs(teleportGroups) do
+            if group.hash == savedGroupHash then
+                selectedGroupHash = savedGroupHash
+                break
+            end
+        end
+    end
+    
+    -- Default to first group if no valid saved selection
+    if not selectedGroupHash and #teleportGroups > 0 then
+        selectedGroupHash = teleportGroups[1].hash
     end
 end
 
 function script.windowShow()
-    loadOnlineTeleports()
-    mapId = ac.getTrackFullID('/')
-    mapHash = hashMapName(mapId)
+    windowOpen = true
+    -- Always ensure teleports are loaded (in case script was reset)
+    local currentMapId = ac.getTrackFullID('/')
+    local currentMapHash = hashMapName(currentMapId)
+    
+    -- Reload teleports if we don't have any or if map changed
+    if #teleportGroups == 0 or mapId ~= currentMapId then
+        mapId = currentMapId
+        mapHash = currentMapHash
+        loadOnlineTeleports()
+        initialized = true
+    end
+    
+    -- Always reload config when window is shown to restore saved selection
+    if mapId and mapHash and #teleportGroups > 0 then
+        local config = ac.INIConfig.load(configFile)
+        local savedGroupHash = config:get(mapHash, "SELECTED_GROUP_HASH", "")
+        
+        -- Find the group that matches the saved hash
+        selectedGroupHash = nil
+        if savedGroupHash ~= "" then
+            for _, group in ipairs(teleportGroups) do
+                if group.hash == savedGroupHash then
+                    selectedGroupHash = savedGroupHash
+                    break
+                end
+            end
+        end
+        
+        -- Default to first group if no valid saved selection
+        if not selectedGroupHash and #teleportGroups > 0 then
+            selectedGroupHash = teleportGroups[1].hash
+        end
+        
+    end
+end
+
+local function loadSettings()
+    local config = ac.INIConfig.load(configFile)
+    
+    teleportWhenPluginClosed = config:get("SETTINGS", "TELEPORT_WHEN_PLUGIN_CLOSED", true)
+end
+
+local function saveSettings()
+    local config = ac.INIConfig.load(configFile)
+    config:set("SETTINGS", "TELEPORT_WHEN_PLUGIN_CLOSED", teleportWhenPluginClosed)
+    config:save()
 end
 
 function script.windowMain(dt)
+    local shouldConsiderCars = {}
+    for j=0, sim.carsCount-1 do
+        local car = ac.getCar(j)
+        if ((not sim.isReplayOnlyMode) and car.isConnected and (not car.isHidingLabels)) or (sim.isReplayActive and car.isActive) then
+            shouldConsiderCars[j] = true
+        end
+    end
+
+    if selectedGroupHash then
+        for _, group in ipairs(teleportGroups) do
+            if group.hash == selectedGroupHash then
+                local availableCount = 0
+                local totalCount = #group.teleports
+                for _, teleport in ipairs(group.teleports) do
+                    if not checkTeleportOccupied(teleport, shouldConsiderCars) then
+                        availableCount = availableCount + 1
+                    end
+                end
+                local displayName = group.name .. ' (' .. availableCount .. '/' .. totalCount .. ' available)'
+                if availableCount == 0 then
+                    ui.pushStyleColor(ui.StyleColor.Text, rgbm.colors.red)
+                end
+                ui.text(displayName)
+                if availableCount == 0 then
+                    ui.popStyleColor()
+                end
+                break
+            end
+        end
+        ui.newLine(-10)
+        ui.separator()
+        ui.newLine(-10)
+    end
+
     ui.text('Teleport Button:')
     teleport_button:control()
+    ui.newLine(-10)
 
     ui.separator()
+    ui.newLine(-10)
     
     ui.text('Available Teleports:')
-
-    local availableTeleports = {}
-    local firstTeleport = nil
     
     if #teleportGroups == 0 then
         if sim.isOnlineRace then
@@ -133,31 +241,17 @@ function script.windowMain(dt)
             ui.textColored('Not in online race', rgbm.colors.red)
         end
     else
-        local shouldConsiderCars = {}
-
-        for i=0, sim.carsCount-1 do
-            local car = ac.getCar(i)
-            if ((not sim.isReplayOnlyMode) and car.isConnected and (not car.isHidingLabels)) or (sim.isReplayActive and car.isActive) then
-                shouldConsiderCars[i] = true
-            end
-        end
-
         -- Display teleport groups as radio buttons
         for i, group in ipairs(teleportGroups) do
             local groupName = group.name
             local availableCount = 0
             local totalCount = #group.teleports
             
+            -- Count available teleports for display purposes
+            
             for _, teleport in ipairs(group.teleports) do
-                if selectedGroupIndex == i - 1 and firstTeleport == nil then
-                    firstTeleport = teleport
-                end
-
                 if not checkTeleportOccupied(teleport, shouldConsiderCars) then
                     availableCount = availableCount + 1
-                    if selectedGroupIndex == i - 1 then
-                        table.insert(availableTeleports, teleport)
-                    end
                 end
             end
             
@@ -170,15 +264,25 @@ function script.windowMain(dt)
                 ui.pushStyleColor(ui.StyleColor.Text, rgbm.colors.yellow)
             end
             
-            if ui.radioButton(displayName .. '##' .. i, selectedGroupIndex == i - 1) then
-                selectedGroupIndex = i - 1
-                if selectedGroupIndex < 0 then return end
+            if ui.radioButton(displayName .. '##' .. i, selectedGroupHash == group.hash) then
+                selectedGroupHash = group.hash
     
+                -- Ensure mapId and mapHash are initialized
+                if not mapId then
+                    mapId = ac.getTrackFullID('/')
+                    mapHash = hashMapName(mapId)
+                end
+                
                 local config = ac.INIConfig.load(configFile)
                 
-                config:set(mapHash, "SELECTED_GROUP_INDEX", selectedGroupIndex)
+                config:set(mapHash, "SELECTED_GROUP_HASH", selectedGroupHash)
+                config:set(mapHash, "SELECTED_GROUP_NAME", group.name)
                 config:set(mapHash, "MAP_NAME", mapId)
-                config:save()
+                
+                local success = config:save()
+                if not success then
+                    ac.log("AdvancedTeleport: Failed to save config file: " .. configFile)
+                end
             end
             
             if availableCount == 0 then
@@ -194,16 +298,53 @@ function script.windowMain(dt)
             end
         end
     end
+end
 
-    if teleport_button:pressed() then
+local function teleportUpdate()
+    -- Update available teleports and first teleport
+    availableTeleports = {}
+    firstTeleport = nil
+    
+    if #teleportGroups > 0 then
+        local shouldConsiderCars = {}
+
+        for i=0, sim.carsCount-1 do
+            local car = ac.getCar(i)
+            if ((not sim.isReplayOnlyMode) and car.isConnected and (not car.isHidingLabels)) or (sim.isReplayActive and car.isActive) then
+                shouldConsiderCars[i] = true
+            end
+        end
+
+        -- Calculate available teleports for the selected group
+        for _, group in ipairs(teleportGroups) do
+            local isSelectedGroup = (selectedGroupHash == group.hash)
+            
+            for _, teleport in ipairs(group.teleports) do
+                if isSelectedGroup and firstTeleport == nil then
+                    firstTeleport = teleport
+                end
+
+                if not checkTeleportOccupied(teleport, shouldConsiderCars) then
+                    if isSelectedGroup then
+                        table.insert(availableTeleports, teleport)
+                    end
+                end
+            end
+        end
+    end
+    
+    if teleport_button:pressed() or teleport_button_alternate:pressed() then
         if not teleportInProgress then
             teleportInProgress = true
             targetTeleport = availableTeleports[1] or firstTeleport
-            if ac.canTeleportToServerPoint(targetTeleport.INDEX) then
+            if targetTeleport and ac.canTeleportToServerPoint(targetTeleport.INDEX) then
                 ac.teleportToServerPoint(targetTeleport.INDEX)
                 teleportToGroupInProgress = true
-            else
+            elseif targetTeleport then
                 teleportToPitsInProgress = true
+            else
+                -- No valid teleport target, cancel the teleport
+                teleportInProgress = false
             end
         else
             teleportInProgress = false
@@ -229,4 +370,24 @@ function script.windowMain(dt)
             end
         end
     end
+end
+
+function script.windowHide()
+    windowOpen = false
+end
+
+function script.background()
+    if windowOpen or teleportWhenPluginClosed then
+        teleportUpdate()
+    end
+end
+
+function script.windowSettings()
+    if ui.checkbox('Teleport when plugin closed', teleportWhenPluginClosed) then
+        teleportWhenPluginClosed = not teleportWhenPluginClosed
+        saveSettings()
+    end
+    ui.separator()
+    ui.text('Alternate teleport button:')
+    teleport_button_alternate:control()
 end
