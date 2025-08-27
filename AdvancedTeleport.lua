@@ -174,8 +174,8 @@ function script.windowShow()
         if not selectedGroupHash and #teleportGroups > 0 then
             selectedGroupHash = teleportGroups[1].hash
         end
-        
     end
+    loadSettings()
 end
 
 local function loadSettings()
@@ -377,6 +377,42 @@ function script.windowHide()
 end
 
 function script.background()
+    if not initialized then
+        local currentMapId = ac.getTrackFullID('/')
+        local currentMapHash = hashMapName(currentMapId)
+        
+        -- Reload teleports if we don't have any or if map changed
+        if #teleportGroups == 0 or mapId ~= currentMapId then
+            mapId = currentMapId
+            mapHash = currentMapHash
+            loadOnlineTeleports()
+            initialized = true
+        end
+        
+        -- Always reload config when window is shown to restore saved selection
+        if mapId and mapHash and #teleportGroups > 0 then
+            local config = ac.INIConfig.load(configFile)
+            local savedGroupHash = config:get(mapHash, "SELECTED_GROUP_HASH", "")
+            
+            -- Find the group that matches the saved hash
+            selectedGroupHash = nil
+            if savedGroupHash ~= "" then
+                for _, group in ipairs(teleportGroups) do
+                    if group.hash == savedGroupHash then
+                        selectedGroupHash = savedGroupHash
+                        break
+                    end
+                end
+            end
+            
+            -- Default to first group if no valid saved selection
+            if not selectedGroupHash and #teleportGroups > 0 then
+                selectedGroupHash = teleportGroups[1].hash
+            end
+        end
+        loadSettings()
+    end
+
     if windowOpen or teleportWhenPluginClosed then
         teleportUpdate()
     end
